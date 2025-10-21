@@ -1,0 +1,15 @@
+# model and export artifacts
+export*/
+Qwen*/
+
+# git files
+.gitattributes
+
+# caches, notebooks
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.cache
+
+# secrets
+.env

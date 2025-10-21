@@ -1,0 +1,17 @@
+{
+    "project": {
+        "name": "qwen2-export-onnx",
+        "description": "Configuration for exporting Qwen-2 model to ONNX and running validation/benchmarking",
+        "version": "0.1.0",
+        "author": "Shivani Gowda"
+    },
+
+    "paths": {
+        "model_path": "./Qwen3-8B",
+        "model_config": "./Qwen3-8B/config.json",
+        "output_dir": "./export3-8B",
+        "onnx_file": "./export3-8B/qwen.onnx",
+        "logs_dir": "./logs",
+        "test_file": "./test/test1.json"
+    }
+}

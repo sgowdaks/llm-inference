@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "prompt": "What is 2 + 2?",
+    "expected_answer": "4"
+  },
+  {
+    "id": 2,
+    "prompt": "What color is the sky on a clear day?",
+    "expected_answer": "blue"
+  },
+  {
+    "id": 3,
+    "prompt": "Translate the word 'cat' to French.",
+    "expected_answer": "chat"
+  },
+  {
+    "id": 4,
+    "prompt": "What is the capital of France?",
+    "expected_answer": "Paris"
+  },
+  {
+    "id": 5,
+    "prompt": "Spell the word 'dog' backwards.",
+    "expected_answer": "god"
+  }
+]
