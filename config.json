@@ -7,11 +7,11 @@
     },
 
     "paths": {
-        "model_path": "./Qwen3-8B",
-        "model_config": "./Qwen3-8B/config.json",
-        "output_dir": "./export3-8B",
-        "onnx_file": "./export3-8B/qwen.onnx",
-        "logs_dir": "./logs",
-        "test_file": "./test/test1.json"
+        "model_path": "/home/shivani/work/llm-inference/Qwen3-8B",
+        "model_config": "/home/shivani/work/llm-inference/Qwen3-8B/config.json",
+        "output_dir": "/home/shivani/work/llm-inference/export3-8B",
+        "onnx_file": "/home/shivani/work/llm-inference/export3-8B/qwen.onnx",
+        "logs_dir": "/home/shivani/work/llm-inference/logs",
+        "test_file": "/home/shivani/work/llm-inference/test/test1.json"
     }
 }
