@@ -37,9 +37,8 @@ private:
     std::unique_ptr<Ort::Session> build_session(const std::string& onnx_path, bool prefer_cuda = true) {
         Ort::SessionOptions session_opts;
         
-        // Logging
-        session_opts.SetLogSeverityLevel(4);
-        session_opts.SetLogVerbosityLevel(4);
+        // Logging - set to 3 for warnings only
+        session_opts.SetLogSeverityLevel(3);
 
         // Threading
         session_opts.SetInterOpNumThreads(0);
@@ -50,88 +49,44 @@ private:
         session_opts.SetExecutionMode(ORT_SEQUENTIAL);
         session_opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        // Session config entries
-        session_opts.AddSessionConfigEntry("session.set_denormal_as_zero", "1");
-        session_opts.AddSessionConfigEntry("session.intra_op.allow_spinning", "1");
-        session_opts.AddSessionConfigEntry("session.inter_op.allow_spinning", "1");
-        session_opts.AddSessionConfigEntry("session.enable_quant_qdq_cleanup", "1");
-        session_opts.AddSessionConfigEntry("session.qdq_matmulnbits_accuracy_level", "4");
-        session_opts.AddSessionConfigEntry("optimization.enable_gelu_approximation", "1");
-        session_opts.AddSessionConfigEntry("disable_synchronize_execution_providers", "1");
-        session_opts.AddSessionConfigEntry("optimization.minimal_build_optimizations", "");
-        session_opts.AddSessionConfigEntry("session.use_device_allocator_for_initializers", "1");
+        // Don't add config entries that might cause issues
+        // Comment out potentially problematic entries
+        /*
+        session_opts.AddConfigEntry("session.set_denormal_as_zero", "1");
+        session_opts.AddConfigEntry("session.intra_op.allow_spinning", "1");
+        session_opts.AddConfigEntry("session.inter_op.allow_spinning", "1");
+        session_opts.AddConfigEntry("session.enable_quant_qdq_cleanup", "1");
+        session_opts.AddConfigEntry("session.qdq_matmulnbits_accuracy_level", "4");
+        session_opts.AddConfigEntry("optimization.enable_gelu_approximation", "1");
+        session_opts.AddConfigEntry("disable_synchronize_execution_providers", "1");
+        session_opts.AddConfigEntry("optimization.minimal_build_optimizations", "");
+        session_opts.AddConfigEntry("session.use_device_allocator_for_initializers", "1");
+        */
 
-        // Provider options
+        // Provider options - try CUDA first
         use_cuda_ = false;
         std::vector<std::string> available_providers = Ort::GetAvailableProviders();
         if (prefer_cuda && 
             std::find(available_providers.begin(), available_providers.end(), "CUDAExecutionProvider") 
             != available_providers.end()) {
-            std::vector<const char*> providers = {"CUDAExecutionProvider", "CPUExecutionProvider"};
-            session_opts.SetProviders(providers.size(), providers.data());
-            use_cuda_ = true;
-        } else {
-            std::vector<const char*> providers = {"CPUExecutionProvider"};
-            session_opts.SetProviders(providers.size(), providers.data());
+            try {
+                OrtCUDAProviderOptions cuda_options;
+                cuda_options.device_id = 0;  // Use GPU 0 (RTX A6000)
+                // cuda_options.device_id = 1;  // Uncomment to use GPU 1 (TITAN X)
+                session_opts.AppendExecutionProvider_CUDA(cuda_options);
+                use_cuda_ = true;
+                std::cout << "Using CUDA execution provider on GPU " << cuda_options.device_id << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "CUDA provider failed, falling back to CPU: " << e.what() << std::endl;
+                use_cuda_ = false;
+            }
+        }
+        
+        if (!use_cuda_) {
+            std::cout << "Using CPU execution provider" << std::endl;
         }
 
         return std::make_unique<Ort::Session>(env_, onnx_path.c_str(), session_opts);
-    }
-
-    std::vector<Ort::Value> prepare_inputs(const std::string& prompt) {
-            // Encode using HuggingFace Tokenizers C++ binding
-            auto ids_vec = tokenizer_->encode(prompt, true); // with special tokens
-            std::vector<int> tokens(ids_vec.begin(), ids_vec.end());
-            std::vector<int64_t> tokens_i64(tokens.begin(), tokens.end());
-        
-        // Create input tensors
-        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
-            OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
-
-        std::vector<Ort::Value> input_tensors;
-
-        // input_ids
-        std::vector<int64_t> input_shape = {1, static_cast<int64_t>(tokens.size())};
-        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, tokens_i64.data(), tokens_i64.size(), 
-            input_shape.data(), input_shape.size()));
-
-        // ids_len
-        std::vector<int64_t> ids_len = {static_cast<int64_t>(tokens.size())};
-        std::vector<int64_t> ids_len_shape = {1};
-        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, ids_len.data(), ids_len.size(),
-            ids_len_shape.data(), ids_len_shape.size()));
-
-        // history_len
-        std::vector<int64_t> history_len = {0};
-        std::vector<int64_t> history_len_shape = {1};
-        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, history_len.data(), history_len.size(),
-            history_len_shape.data(), history_len_shape.size()));
-
-        // attention_mask
-        std::vector<int8_t> attention_mask = {1};
-        std::vector<int64_t> attention_mask_shape = {1};
-        input_tensors.push_back(Ort::Value::CreateTensor<int8_t>(
-            memory_info, attention_mask.data(), attention_mask.size(),
-            attention_mask_shape.data(), attention_mask_shape.size()));
-
-        // past_keys
-        std::vector<float> past_keys(num_key_value_heads_ * head_dim_ * 0);
-        std::vector<int64_t> past_keys_shape = {num_key_value_heads_, 1, head_dim_, 0};
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(
-            memory_info, past_keys.data(), past_keys.size(),
-            past_keys_shape.data(), past_keys_shape.size()));
-
-        // past_values
-        std::vector<float> past_values(num_key_value_heads_ * 0 * head_dim_);
-        std::vector<int64_t> past_values_shape = {num_key_value_heads_, 1, 0, head_dim_};
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(
-            memory_info, past_values.data(), past_values.size(),
-            past_values_shape.data(), past_values_shape.size()));
-
-        return input_tensors;
     }
 
 public:
@@ -198,22 +153,81 @@ public:
     void run_inference(const std::string& prompt, int max_decode = 512, bool short_answer = false) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        // Prepare inputs
-        auto input_tensors = prepare_inputs(prompt);
+        // Encode tokens first and keep them alive
+        auto ids_vec = tokenizer_->encode(prompt, true);
+        std::vector<int32_t> current_tokens(ids_vec.begin(), ids_vec.end());
+        
+        // These need to persist across iterations
+        std::vector<int64_t> history_len_data = {0};
+        std::vector<int64_t> ids_len_data = {static_cast<int64_t>(current_tokens.size())};
+        std::vector<int8_t> attention_mask_data = {1};
+        
+        // Create input tensors with data that stays in scope
+        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
+            OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+
+        std::vector<Ort::Value> input_tensors;
+
+        // Add past_keys for each layer (num_layers_ layers)
+        std::vector<float> past_keys_empty;  // Empty tensor
+        std::vector<int64_t> past_keys_shape = {num_key_value_heads_, 1, head_dim_, 0};
+        for (int i = 0; i < num_layers_; i++) {
+            input_tensors.push_back(Ort::Value::CreateTensor<float>(
+                memory_info, past_keys_empty.data(), 0,
+                past_keys_shape.data(), past_keys_shape.size()));
+        }
+
+        // Add past_values for each layer (num_layers_ layers)
+        std::vector<float> past_values_empty;  // Empty tensor
+        std::vector<int64_t> past_values_shape = {num_key_value_heads_, 1, 0, head_dim_};
+        for (int i = 0; i < num_layers_; i++) {
+            input_tensors.push_back(Ort::Value::CreateTensor<float>(
+                memory_info, past_values_empty.data(), 0,
+                past_values_shape.data(), past_values_shape.size()));
+        }
+
+        // input_ids - use int32_t
+        std::vector<int64_t> input_shape = {1, static_cast<int64_t>(current_tokens.size())};
+        input_tensors.push_back(Ort::Value::CreateTensor<int32_t>(
+            memory_info, current_tokens.data(), current_tokens.size(), 
+            input_shape.data(), input_shape.size()));
+
+        // history_len
+        std::vector<int64_t> history_len_shape = {1};
+        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+            memory_info, history_len_data.data(), history_len_data.size(),
+            history_len_shape.data(), history_len_shape.size()));
+
+        // ids_len
+        std::vector<int64_t> ids_len_shape = {1};
+        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+            memory_info, ids_len_data.data(), ids_len_data.size(),
+            ids_len_shape.data(), ids_len_shape.size()));
+
+        // attention_mask
+        std::vector<int64_t> attention_mask_shape = {1};
+        input_tensors.push_back(Ort::Value::CreateTensor<int8_t>(
+            memory_info, attention_mask_data.data(), attention_mask_data.size(),
+            attention_mask_shape.data(), attention_mask_shape.size()));
         
         // Get input/output names
         Ort::AllocatorWithDefaultOptions allocator;
         size_t num_input_nodes = session_->GetInputCount();
         size_t num_output_nodes = session_->GetOutputCount();
         
+        // Store allocated strings so they don't go out of scope
+        std::vector<Ort::AllocatedStringPtr> input_name_ptrs;
+        std::vector<Ort::AllocatedStringPtr> output_name_ptrs;
         std::vector<const char*> input_names;
         std::vector<const char*> output_names;
         
         for (size_t i = 0; i < num_input_nodes; i++) {
-            input_names.push_back(session_->GetInputNameAllocated(i, allocator).get());
+            input_name_ptrs.push_back(session_->GetInputNameAllocated(i, allocator));
+            input_names.push_back(input_name_ptrs.back().get());
         }
         for (size_t i = 0; i < num_output_nodes; i++) {
-            output_names.push_back(session_->GetOutputNameAllocated(i, allocator).get());
+            output_name_ptrs.push_back(session_->GetOutputNameAllocated(i, allocator));
+            output_names.push_back(output_name_ptrs.back().get());
         }
 
         // Decode loop
@@ -227,11 +241,23 @@ public:
                 input_names.data(), input_tensors.data(), input_tensors.size(),
                 output_names.data(), output_names.size());
 
-            // Get token from output
-            auto token_tensor = output_tensors[output_tensors.size() - 2];
+            // Get token from output (use reference to avoid copy)
+            auto& token_tensor = output_tensors[output_tensors.size() - 2];
             auto token_info = token_tensor.GetTensorTypeAndShapeInfo();
-            int64_t* token_data = token_tensor.GetTensorMutableData<int64_t>();
-            int64_t token_id = token_data[0];
+            
+            // Check if we got int32 or int64
+            auto type_info = token_info.GetElementType();
+            int64_t token_id = 0;
+            if (type_info == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+                int64_t* token_data = token_tensor.GetTensorMutableData<int64_t>();
+                token_id = token_data[0];
+            } else if (type_info == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+                int32_t* token_data = token_tensor.GetTensorMutableData<int32_t>();
+                token_id = static_cast<int64_t>(token_data[0]);
+            } else {
+                std::cerr << "Unexpected token data type: " << type_info << std::endl;
+                break;
+            }
             
             num_decoded++;
 
@@ -241,33 +267,7 @@ public:
                 break;
             }
 
-            // Update inputs for next iteration
-            // Ort::Value is move-only; some std::vector move-assign implementations
-            // may attempt to copy elements which fails because copy ctor is deleted.
-            // Swap the vectors to transfer ownership of the underlying buffers
-            // without invoking copies.
-            input_tensors.swap(output_tensors);
-
-            // Reset certain inputs after first token
-            if (num_decoded < 2) {
-                Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
-                    OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
-                
-                std::vector<int8_t> attention_mask = {0};
-                std::vector<int64_t> attention_mask_shape = {1};
-                input_tensors[3] = Ort::Value::CreateTensor<int8_t>(
-                    memory_info, attention_mask.data(), attention_mask.size(),
-                    attention_mask_shape.data(), attention_mask_shape.size());
-
-                std::vector<int64_t> ids_len = {1};
-                std::vector<int64_t> ids_len_shape = {1};
-                input_tensors[1] = Ort::Value::CreateTensor<int64_t>(
-                    memory_info, ids_len.data(), ids_len.size(),
-                    ids_len_shape.data(), ids_len_shape.size());
-            }
-
             // Decode and print token
-            // naive decode: lookup token string from id_to_token_ and do small post-processing
             std::string token_str;
             if (token_id >= 0 && token_id < (int)id_to_token_.size() && !id_to_token_[token_id].empty()) {
                 token_str = id_to_token_[token_id];
@@ -293,6 +293,45 @@ public:
                     break;
                 }
             }
+
+            // Prepare inputs for next iteration
+            // The outputs are: out_key_0..out_key_35, out_value_0..out_value_35, max_logit_id, kv_seq_len
+            // We need to construct: in_key_0..in_key_35, in_value_0..in_value_35, input_ids, history_len, ids_len, attention_mask
+            
+            // Clear and rebuild input_tensors for next iteration
+            input_tensors.clear();
+            
+            // Copy KV caches from outputs (first 72 tensors)
+            for (size_t i = 0; i < num_layers_ * 2; i++) {
+                input_tensors.push_back(std::move(output_tensors[i]));
+            }
+            
+            // Update current_tokens with the new token for next iteration
+            current_tokens.clear();
+            current_tokens.push_back(static_cast<int32_t>(token_id));
+            
+            std::vector<int64_t> token_shape = {1, 1};
+            input_tensors.push_back(Ort::Value::CreateTensor<int32_t>(
+                memory_info, current_tokens.data(), current_tokens.size(),
+                token_shape.data(), token_shape.size()));
+            
+            // history_len - increment each time
+            history_len_data[0] = history_len_data[0] + ids_len_data[0];
+            input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                memory_info, history_len_data.data(), history_len_data.size(),
+                history_len_shape.data(), history_len_shape.size()));
+            
+            // ids_len - always 1 after first iteration
+            ids_len_data[0] = 1;
+            input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                memory_info, ids_len_data.data(), ids_len_data.size(),
+                ids_len_shape.data(), ids_len_shape.size()));
+            
+            // attention_mask - 0 after first iteration
+            attention_mask_data[0] = 0;
+            input_tensors.push_back(Ort::Value::CreateTensor<int8_t>(
+                memory_info, attention_mask_data.data(), attention_mask_data.size(),
+                attention_mask_shape.data(), attention_mask_shape.size()));
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();
