@@ -56,7 +56,9 @@ pip install onnxruntime-gpu
 ### C++ Dependencies
 - CMake 3.16+
 - C++17 compatible compiler (gcc, clang, MSVC)
-- ONNX Runtime (CPU or GPU build)
+- ONNX Runtime 1.19.0+ (GPU build recommended)
+- CUDA Toolkit 11.x or 12.x (for GPU inference)
+- cuDNN 9.x (for GPU inference)
 - nlohmann/json library
 - tokenizers-cpp (included as submodule)
 
@@ -104,16 +106,56 @@ python onnx_inference.py --config config.json --short-answer --prompt "2 + 2 = ?
 
 ### 4. Build and Run C++ Inference
 
+#### Setup ONNX Runtime GPU
+
+Download ONNX Runtime GPU build:
+```bash
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.19.0/onnxruntime-linux-x64-gpu-1.19.0.tgz
+tar -xzf onnxruntime-linux-x64-gpu-1.19.0.tgz
+```
+
+Install cuDNN 9 (required for GPU inference):
+```bash
+# Using conda (recommended)
+conda install -c conda-forge cudnn=9
+
+# Or download from NVIDIA and set LD_LIBRARY_PATH manually
+```
+
+#### Build the C++ executable
+
 ```bash
 # Configure build
 mkdir build && cd build
-cmake .. -DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime
+cmake .. -DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime-linux-x64-gpu-1.19.0
 
 # Build
-make -j$(nproc)
+make -j4
 
-# Run
-./onnx_inference "Hello, how are you?"
+# Return to project root
+cd ..
+```
+
+#### Run GPU Inference
+
+Use the provided wrapper script to set up the environment:
+```bash
+# Create run_gpu_inference.sh if it doesn't exist
+cat > run_gpu_inference.sh << 'EOF'
+#!/bin/bash
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+./build/onnx_inference "$@"
+EOF
+chmod +x run_gpu_inference.sh
+
+# Run inference
+./run_gpu_inference.sh "What is 2+2?"
+```
+
+Or for CPU-only inference (slower):
+```bash
+./build/onnx_inference "What is 2+2?"
 ```
 
 ## Architecture
@@ -151,16 +193,20 @@ Performance settings:
 ### C++ Inference (`onnx_inference.cpp`)
 
 Features:
-- Native ONNX Runtime C++ API
+- Native ONNX Runtime C++ API (v1.19.0+)
+- GPU acceleration with CUDA execution provider
 - tokenizers-cpp for fast tokenization
-- Streaming token generation
-- Automatic CUDA detection and fallback
+- Streaming token generation with KV-cache management
+- Automatic CUDA detection and fallback to CPU
+- Proper tensor lifecycle management for multi-iteration decode
 - Naive UTF-8 decoding with character replacement
 
 Optimizations:
-- Zero-copy tensor creation
+- Zero-copy tensor creation where possible
+- Efficient KV-cache reuse via std::move
+- Persistent data buffers across decode iterations
 - Minimal heap allocations in decode loop
-- Efficient OrtValue reuse between iterations
+- Device selection for multi-GPU systems
 
 ## Configuration Options
 
@@ -214,55 +260,91 @@ python exporter.py --config config.json --mode test
 
 Typical performance on example hardware:
 
-**Qwen3-8B on CPU (AMD Ryzen 9 5950X):**
-- First token: ~500ms
-- Subsequent tokens: ~15-20 tokens/sec
+**Qwen3-8B on GPU (NVIDIA RTX A6000, CUDA):**
+- First token: ~200ms (model load time separate)
+- Subsequent tokens: ~12 tokens/sec
+- Using ONNX Runtime 1.19.0 GPU + cuDNN 9
 
 **Qwen3-8B on GPU (NVIDIA RTX 3090):**
 - First token: ~100ms
 - Subsequent tokens: ~60-80 tokens/sec
 
+**Qwen3-8B on CPU (AMD Ryzen 9 5950X):**
+- First token: ~500ms
+- Subsequent tokens: ~15-20 tokens/sec
+
 **Qwen3-1.7B on CPU:**
 - Subsequent tokens: ~30-40 tokens/sec
 
-Performance varies based on sequence length, hardware, and ONNX Runtime build.
+Performance varies based on sequence length, hardware, ONNX Runtime build, and CUDA/cuDNN versions.
 
 ## Development Roadmap
 
 See `todo.md` for planned improvements:
+- [x] Fix ONNX Runtime 1.19.0 API compatibility
+- [x] Enable GPU inference with CUDA provider
+- [x] Fix tensor lifecycle issues in decode loop
+- [x] Add cuDNN 9 support
 - [ ] Remove transformers dependency at inference time
 - [ ] Create minimal runtime config during export
 - [ ] Add HuggingFace download automation
 - [ ] Expand test suite with evaluation metrics
 - [ ] Add accuracy comparison with HF baseline
+- [ ] Support multi-GPU inference
+- [ ] Add batch inference support
 
 ## Troubleshooting
 
 ### C++ Build Issues
 
-#### ONNX Runtime API Errors
-The C++ code has been updated to use the correct ONNX Runtime 1.19.0 API. If you encounter build errors:
-- Ensure you're using ONNX Runtime 1.19.0 or later
-- Check that `ONNXRUNTIME_ROOT_DIR` is set correctly in CMake
-- See `FIXES_APPLIED.md` for details on API changes
+#### ONNX Runtime API Compatibility
+The C++ code requires ONNX Runtime 1.19.0 or later. Key API changes:
+- `AddSessionConfigEntry` → `AddConfigEntry`
+- `SetLogVerbosityLevel` removed (use session options)
+- `SetProviders` → `AppendExecutionProvider_CUDA` for GPU
 
-#### Missing Mul Operator Error
+If you encounter API errors, ensure you're using ONNX Runtime 1.19.0+.
+
+#### Missing cuDNN for GPU Inference
+**Error**: `Failed to load CUDA execution provider` or `cuDNN library not found`
+
+**Solution**: Install cuDNN 9 and set up environment:
+```bash
+# Install via conda (recommended)
+conda install -c conda-forge cudnn=9
+
+# Use the wrapper script to run
+./run_gpu_inference.sh "Your prompt here"
+```
+
+The wrapper script sets:
+- `LD_LIBRARY_PATH=$CONDA_PREFIX/lib` (finds cuDNN)
+- `LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6` (avoids version conflicts)
+
+#### Opset Version Error
 **Error**: `Could not find an implementation for Mul(14) node`
 
-**Cause**: GPU builds of ONNX Runtime may not include all CPU kernels.
+**Cause**: ONNX Runtime GPU builds may not include all CPU fallback kernels for newer opsets.
 
-**Solution**: Re-export the model with opset 13:
+**Solution**: The exporter now uses opset 13 by default. If you have an old export, re-run:
 ```bash
-# The exporter has been updated - just re-run:
 python exporter.py --config config.json --mode export
 ```
 
-Alternatively, use a CPU-only ONNX Runtime build.
+#### Tensor Type Mismatches
+**Error**: `Unexpected input data type. Actual: (tensor(int64)), expected: (tensor(float))`
+
+**Cause**: Input tensors not properly reconstructed between decode iterations.
+
+**Solution**: Already fixed in current code. Ensure you have the latest version where:
+- `current_tokens`, `history_len_data`, `ids_len_data`, `attention_mask_data` persist across iterations
+- KV cache tensors are moved (not copied) from outputs to inputs
+- Memory info and shapes are properly maintained
 
 ### ONNX Runtime not found
 Set the `ONNXRUNTIME_ROOT_DIR` CMake variable:
 ```bash
-cmake .. -DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime
+cmake .. -DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime-linux-x64-gpu-1.19.0
 ```
 
 ### Tokenizer errors
@@ -271,23 +353,32 @@ Ensure `tokenizer.json` exists in your model directory:
 ls -la /path/to/Qwen3-8B/tokenizer.json
 ```
 
-### CUDA not detected
-Check available providers:
+### CUDA not available
+Check available providers in C++:
+```bash
+# The program will print: "Using CUDA execution provider on GPU 0"
+# Or fall back to: "CUDA provider not available, using CPU"
+```
+
+For Python:
 ```python
 import onnxruntime
 print(onnxruntime.get_available_providers())
+# Should show: ['CUDAExecutionProvider', 'CPUExecutionProvider']
 ```
 
-Install CUDA-enabled ONNX Runtime:
-```bash
-pip install onnxruntime-gpu
-```
+### GPU Memory Issues
+If you run out of GPU memory:
+- Use a smaller model (Qwen3-1.7B instead of 8B)
+- Reduce batch size (currently 1)
+- Select a different GPU: Modify `device_id` in `onnx_inference.cpp`
+- Close other GPU applications
 
-### Slow inference
-- Enable CUDA if available
-- Reduce `max_decode` parameter
-- Use smaller model (1.7B vs 8B)
+### Performance Issues
+- Ensure you're using GPU inference (check for "Using CUDA" message)
 - Build ONNX Runtime from source with optimizations
+- Use cuDNN 9 for best performance
+- Check GPU utilization with `nvidia-smi`
 
 ## Credits
 
