@@ -389,9 +389,9 @@ This project is based on the [Native-LLM-for-Android](https://github.com/DakeQQ/
 - Modular architecture
 - Enhanced documentation
 
-## License
+<!-- ## License
 
-[Specify your license here]
+[Specify your license here] -->
 
 ## Contributing
 
