@@ -1,15 +1,101 @@
-# model and export artifacts
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+build/
+build_*/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Model artifacts and exports
+export/
 export*/
 Qwen*/
+models/
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.pth
 
-# git files
-.gitattributes
+# Logs and outputs
+logs/
+*.log
+/tmp/
+*.log.*
 
-# caches, notebooks
-.ipynb_checkpoints/
+# Test outputs
+test_build/
+test_outputs/
+*.test
+
+# Caches
+.cache/
 .pytest_cache/
 .mypy_cache/
-.cache
+.ipynb_checkpoints/
+*.ipynb_checkpoints
 
-# secrets
+# System files
+.gitattributes
+.DS_Store
+Thumbs.db
+
+# Secrets and config
 .env
+.env.*
+*.key
+*.pem
+configs/config.json
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+site/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Profiling data
+*.prof
+*.lprof
+profile.stats

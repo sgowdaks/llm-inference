@@ -1,17 +1,1 @@
-{
-    "project": {
-        "name": "qwen2-export-onnx",
-        "description": "Configuration for exporting Qwen-2 model to ONNX and running validation/benchmarking",
-        "version": "0.1.0",
-        "author": "Shivani Gowda"
-    },
-
-    "paths": {
-        "model_path": "/home/shivani/work/llm-inference/Qwen3-8B",
-        "model_config": "/home/shivani/work/llm-inference/Qwen3-8B/config.json",
-        "output_dir": "/home/shivani/work/llm-inference/export3-8B",
-        "onnx_file": "/home/shivani/work/llm-inference/export3-8B/qwen.onnx",
-        "logs_dir": "/home/shivani/work/llm-inference/logs",
-        "test_file": "/home/shivani/work/llm-inference/test/test1.json"
-    }
-}
+configs/config.json

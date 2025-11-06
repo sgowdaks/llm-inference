@@ -24,20 +24,40 @@ This project provides tools to:
 
 ```
 .
-├── CMakeLists.txt           # Build configuration for C++ inference
-├── config.json              # Runtime configuration (paths, model settings)
-├── exporter.py              # Model export script (PyTorch → ONNX)
-├── onnx_inference.py        # Python inference engine
-├── onnx_inference.cpp       # C++ inference engine
-├── launch.json              # VS Code debug configuration
-├── todo.md                  # Development roadmap
-├── build/                   # CMake build artifacts
-├── export/                  # ONNX model weights and constants (1.7B)
-├── export3-8B/              # ONNX model weights and constants (8B)
-├── Qwen3-1.7B/              # Qwen 1.7B model files
-├── Qwen3-8B/                # Qwen 8B model files
-├── test/                    # Test datasets and evaluation scripts
+├── src/                     # Source code
+│   ├── onnx_inference.cpp   # C++ inference engine
+│   ├── onnx_inference.py    # Python inference engine
+│   ├── exporter.py          # Model export script (PyTorch → ONNX)
+│   └── __init__.py          # Package initialization
+├── scripts/                 # Utility scripts
+│   ├── run_gpu_inference.sh # GPU inference wrapper
+│   ├── test_inference.sh    # Integration tests
+│   ├── quick_test.sh        # Quick validation
+│   └── download_onnxruntime.sh # ONNX Runtime downloader
+├── configs/                 # Configuration files
+│   ├── config.json          # Runtime configuration (user-specific)
+│   ├── config.example.json  # Example configuration template
+│   └── launch.json          # VS Code debug configuration
+├── docs/                    # Documentation
+│   ├── BUILD.md             # Detailed build instructions
+│   ├── CONTRIBUTING.md      # Contribution guidelines
+│   ├── FIXES_APPLIED.md     # Bug fixes and workarounds
+│   └── todo.md              # Development roadmap
+├── examples/                # Example scripts and notebooks
+│   └── test_onnx_model.py   # ONNX model testing
+├── test/                    # Test datasets
+├── build/                   # Build artifacts (generated)
+│   ├── bin/                 # Compiled executables
+│   └── lib/                 # Compiled libraries
+├── export/                  # ONNX exports (1.7B model)
+├── export3-8B/              # ONNX exports (8B model)
+├── Qwen3-1.7B/              # Qwen 1.7B model files (downloaded)
+├── Qwen3-8B/                # Qwen 8B model files (downloaded)
 ├── tokenizers/              # Tokenizers C++ bindings (submodule)
+├── CMakeLists.txt           # Build configuration
+├── setup.py                 # Python package setup
+├── requirements.txt         # Python dependencies
+├── .gitignore               # Git ignore rules
 └── README.md                # This file
 ```
 
@@ -45,8 +65,14 @@ This project provides tools to:
 
 ### Python Dependencies
 ```bash
-pip install torch transformers onnxruntime numpy
+pip install -r requirements.txt
 ```
+
+Core dependencies:
+- torch>=2.0.0
+- transformers>=4.30.0
+- onnxruntime>=1.19.0
+- numpy>=1.24.0
 
 Optional for CUDA:
 ```bash
@@ -64,9 +90,23 @@ pip install onnxruntime-gpu
 
 ## Quick Start
 
-### 1. Configuration
+### 1. Clone and Setup
 
-Edit `config.json` to set your paths:
+```bash
+git clone https://github.com/sgowdaks/llm-inference.git
+cd llm-inference
+git submodule update --init --recursive
+```
+
+### 2. Configuration
+
+Copy and edit the configuration file:
+
+```bash
+cp configs/config.example.json configs/config.json
+```
+
+Edit `configs/config.json` to set your paths:
 
 ```json
 {
@@ -79,10 +119,10 @@ Edit `config.json` to set your paths:
 }
 ```
 
-### 2. Export Model to ONNX
+### 3. Export Model to ONNX
 
 ```bash
-python exporter.py --config config.json --mode export
+python src/exporter.py --config configs/config.json --mode export
 ```
 
 This will:
@@ -91,20 +131,40 @@ This will:
 - Export to ONNX with dynamic axes for efficient batching
 - Save model weights and constants to the export directory
 
-### 3. Run Python Inference
+### 4. Run Python Inference
 
 ```bash
 # Single prompt
-python onnx_inference.py --config config.json --prompt "What is the capital of France?"
+python src/onnx_inference.py --config configs/config.json --prompt "What is the capital of France?"
 
 # Test mode with JSON test file
-python onnx_inference.py --config config.json --test-mode
+python src/onnx_inference.py --config configs/config.json --test-mode
 
 # Short answer mode (stops at first sentence)
-python onnx_inference.py --config config.json --short-answer --prompt "2 + 2 = ?"
+python src/onnx_inference.py --config configs/config.json --short-answer --prompt "2 + 2 = ?"
 ```
 
-### 4. Build and Run C++ Inference
+### 5. Build and Run C++ Inference
+
+See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions.
+
+Quick build:
+
+```bash
+# Configure
+mkdir build && cd build
+cmake .. -DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime-linux-x64-gpu-1.19.0
+
+# Build
+make -j4
+
+# Run (GPU)
+cd ..
+./scripts/run_gpu_inference.sh "What is 2+2?"
+
+# Or run directly (CPU)
+./build/bin/onnx_inference "What is 2+2?"
+```
 
 #### Setup ONNX Runtime GPU
 

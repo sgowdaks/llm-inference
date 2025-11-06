@@ -1,0 +1,39 @@
+{
+    "project": {
+        "name": "qwen-onnx-inference",
+        "description": "Configuration for exporting Qwen model to ONNX and running inference",
+        "version": "0.1.0",
+        "author": "Shivani Gowda"
+    },
+
+    "paths": {
+        "model_path": "/path/to/Qwen3-8B",
+        "model_config": "/path/to/Qwen3-8B/config.json",
+        "output_dir": "/path/to/export3-8B",
+        "onnx_file": "/path/to/export3-8B/qwen.onnx",
+        "logs_dir": "/path/to/logs",
+        "test_file": "/path/to/test/test1.json"
+    },
+
+    "model": {
+        "name": "Qwen3-8B",
+        "type": "decoder-only",
+        "num_layers": 36,
+        "num_key_value_heads": 4,
+        "head_dim": 128,
+        "vocab_size": 151936
+    },
+
+    "export": {
+        "opset_version": 13,
+        "dynamic_axes": true,
+        "optimize": true
+    },
+
+    "inference": {
+        "max_tokens": 512,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "device": "cuda:0"
+    }
+}
