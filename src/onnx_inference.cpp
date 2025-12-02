@@ -344,6 +344,24 @@ public:
 
 int main(int argc, char* argv[]) {
     try {
+        // Parse CLI flags: --device cpu|gpu (default: gpu)
+        std::string device = "gpu";
+        std::vector<std::string> positional;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg.rfind("--device=", 0) == 0) {
+                device = arg.substr(9);
+            } else if (arg == "--device" || arg == "-d") {
+                if (i + 1 < argc) {
+                    device = argv[++i];
+                }
+            } else if (arg.size() > 0 && arg[0] != '-') {
+                positional.push_back(arg);
+            }
+        }
+
+        bool prefer_cuda = (device != "cpu" && device != "CPU");
+
         // Load configuration
         std::string config_path = "./config.json";
         auto config = nlohmann::json::parse(std::ifstream(config_path));
@@ -352,16 +370,20 @@ int main(int argc, char* argv[]) {
         std::string onnx_file = config["paths"]["onnx_file"];
         std::string model_config = config["paths"]["model_config"];
 
-        // Create inference object
-        OnnxInference inference(model_dir, onnx_file, model_config);
+        // Create inference object with device preference
+        OnnxInference inference(model_dir, onnx_file, model_config, prefer_cuda);
 
         // Run inference
         std::string prompt = "Hello there, how are u?";
-        if (argc > 1) {
-            prompt = argv[1];
+        if (!positional.empty()) {
+            prompt = "";
+            for (size_t i = 0; i < positional.size(); ++i) {
+                if (i > 0) prompt += " ";
+                prompt += positional[i];
+            }
         }
 
-        std::cout << "\nPrompt: " << prompt << "\nQwen Answering:\n" << std::endl;
+        std::cout << "\nPrompt: " << prompt << "\nQwen Answering (device=" << device << "):\n" << std::endl;
         inference.run_inference(prompt);
 
         return 0;
