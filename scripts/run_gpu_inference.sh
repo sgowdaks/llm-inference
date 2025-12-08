@@ -22,6 +22,6 @@ fi
 
 # Run inference - now outputs to build/bin
 cd "$PROJECT_ROOT"
-./build/bin/onnx_inference "$@"
+./build/bin/onnx_inference_ultra "$@"
 
 

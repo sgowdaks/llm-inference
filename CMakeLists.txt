@@ -74,8 +74,43 @@ if(TARGET tokenizers_cpp)
     target_link_libraries(onnx_inference PRIVATE tokenizers_cpp tokenizers_c)
 endif()
 
+# Create optimized ONNX inference executable
+add_executable(onnx_inference_optimized ${CMAKE_CURRENT_SOURCE_DIR}/src/onnx_inference_optimized.cpp)
+target_include_directories(onnx_inference_optimized PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(onnx_inference_optimized PRIVATE onnxruntime nlohmann_json::nlohmann_json)
+if(TARGET tokenizers_cpp)
+    target_link_libraries(onnx_inference_optimized PRIVATE tokenizers_cpp tokenizers_c)
+endif()
+
+# Create fast GPU ONNX inference executable
+add_executable(onnx_inference_fast ${CMAKE_CURRENT_SOURCE_DIR}/src/onnx_inference_fast.cpp)
+target_include_directories(onnx_inference_fast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(onnx_inference_fast PRIVATE onnxruntime nlohmann_json::nlohmann_json)
+if(TARGET tokenizers_cpp)
+    target_link_libraries(onnx_inference_fast PRIVATE tokenizers_cpp tokenizers_c)
+endif()
+
+# Create ULTRA-fast GPU ONNX inference executable
+add_executable(onnx_inference_ultra ${CMAKE_CURRENT_SOURCE_DIR}/src/onnx_inference_ultra.cpp)
+target_include_directories(onnx_inference_ultra PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(onnx_inference_ultra PRIVATE onnxruntime nlohmann_json::nlohmann_json)
+if(TARGET tokenizers_cpp)
+    target_link_libraries(onnx_inference_ultra PRIVATE tokenizers_cpp tokenizers_c)
+endif()
+
+# Create PROFILED ONNX inference executable
+add_executable(onnx_inference_profiled ${CMAKE_CURRENT_SOURCE_DIR}/src/onnx_inference_profiled.cpp)
+target_include_directories(onnx_inference_profiled PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(onnx_inference_profiled PRIVATE onnxruntime nlohmann_json::nlohmann_json)
+if(TARGET tokenizers_cpp)
+    target_link_libraries(onnx_inference_profiled PRIVATE tokenizers_cpp tokenizers_c)
+endif()
+if(TARGET tokenizers_cpp)
+    target_link_libraries(onnx_inference_optimized PRIVATE tokenizers_cpp tokenizers_c)
+endif()
+
 # Installation rules
-install(TARGETS onnx_inference
+install(TARGETS onnx_inference onnx_inference_optimized
     RUNTIME DESTINATION bin
 )
 

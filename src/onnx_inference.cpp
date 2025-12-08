@@ -153,8 +153,12 @@ public:
     void run_inference(const std::string& prompt, int max_decode = 512, bool short_answer = false) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
+        // Apply chat template for Qwen3 models
+        // Format: <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+        std::string formatted_prompt = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        
         // Encode tokens first and keep them alive
-        auto ids_vec = tokenizer_->encode(prompt, true);
+        auto ids_vec = tokenizer_->encode(formatted_prompt, true);
         std::vector<int32_t> current_tokens(ids_vec.begin(), ids_vec.end());
         
         // These need to persist across iterations

@@ -210,6 +210,7 @@ def export_to_onnx(config: ExportConfig) -> None:
     output_names.append('kv_seq_len')
 
     # Export: ensure wrapper is on device (buffers moved) and inputs are on same device
+    # Use dynamo=False to force legacy TorchScript export (PyTorch 2.9+ defaults to new API)
     torch.onnx.export(
         wrapper,
         tuple(all_inputs),
@@ -219,6 +220,7 @@ def export_to_onnx(config: ExportConfig) -> None:
         dynamic_axes=dynamic_axes,
         do_constant_folding=True,
         opset_version=13,  # Changed from 17 to 13 for better compatibility
+        dynamo=False,  # Force legacy export mode
     )
 
 
