@@ -114,6 +114,32 @@ class QWENWrapper(torch.nn.Module):
         self.register_buffer('attention_mask', (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8, device=device))) * -128)
 
     def forward(self, *all_inputs):
+        """"
+        Forward pass through the model for inference with KV caching.
+        Args:
+            *all_inputs: Variable length argument list containing:
+                - all_inputs[0:num_layers]: Past key states for each layer
+                - all_inputs[num_layers:2*num_layers]: Past value states for each layer
+                - all_inputs[-4]: input_ids (torch.Tensor): Input token IDs
+                - all_inputs[-3]: history_len (int): Length of the history/past sequence
+                - all_inputs[-2]: ids_len (int): Length of the current input sequence
+                - all_inputs[-1]: attention_mask modifier (torch.Tensor): Mask modifier to apply to attention
+        Returns:
+            tuple: Contains:
+                - *self.save_key: Updated key states for all layers
+                - *self.save_value: Updated value states for all layers
+                - torch.Tensor: Predicted next token ID (argmax of logits)
+                - int: Total sequence length (kv_seq_len)
+        """  
+        
+        """
+        TODO: combine past key/value inputs and outputs into single tensors for efficiency
+        past_keys: [B x Layers x Num_KV_Heads x Head_Dim x History_Len]
+        past_values: [B x Layers x Num_KV_Heads x History_Len x Head_Dim]
+
+
+        """
+
         input_ids = all_inputs[-4]
         history_len = all_inputs[-3]
         ids_len = all_inputs[-2]

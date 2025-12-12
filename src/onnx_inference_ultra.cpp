@@ -3,11 +3,13 @@
 #include <string>
 #include <vector>
 #include <chrono>
-#include <onnxruntime_cxx_api.h>
-#include "tokenizers/tokenizers.h"
-#include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <cstring>
+
+
+#include <nlohmann/json.hpp>
+#include "tokenizers/tokenizers.h"
+#include <onnxruntime_cxx_api.h>
 
 using json = nlohmann::json;
 
@@ -47,12 +49,9 @@ private:
     std::vector<const char*> output_names_;
     Ort::MemoryInfo memory_info_;
     
-    // Ultra-fast token lookup with pre-processed strings
-    std::vector<std::string> id_to_token_;
-    std::unordered_map<int64_t, std::string> fast_token_cache_;
+    // Token decoding will use tokenizer decode API directly
     
-    // Thread-local storage for minimal allocation
-    thread_local static std::string decode_buffer_;
+
     
     json load_json(const std::string& path) {
         std::ifstream file(path);
@@ -122,69 +121,7 @@ private:
         return std::make_unique<Ort::Session>(env_, onnx_path.c_str(), session_opts);
     }
 
-    void build_ultra_fast_vocab(const std::string& model_dir) {
-        std::string tokenizer_json_path = model_dir + "/tokenizer.json";
-        std::ifstream f(tokenizer_json_path);
-        if (!f.is_open()) {
-            std::cerr << "Warning: Could not open tokenizer.json for vocab" << std::endl;
-            return;
-        }
-        
-        json j;
-        f >> j;
-        
-        if (j.contains("model") && j["model"].contains("vocab")) {
-            auto vocab = j["model"]["vocab"];
-            int max_id = -1;
-            for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-                int id = it.value().get<int>();
-                if (id > max_id) max_id = id;
-            }
-            id_to_token_.assign(max_id + 1, std::string());
-            
-            // Pre-process ALL tokens to avoid UTF-8 replacement in hot loop
-            for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-                std::string token = it.key();
-                int id = it.value().get<int>();
-                
-                // Pre-apply UTF-8 replacement for Ġ character
-                size_t pos = 0;
-                while (true) {
-                    auto found = token.find("\xC4\xA0", pos);
-                    if (found == std::string::npos) break;
-                    token.replace(found, 2, " ");
-                    pos = found + 1;
-                }
-                
-                if (id >= 0 && id < (int)id_to_token_.size()) {
-                    id_to_token_[id] = std::move(token);
-                }
-            }
-        }
-        
-        if (j.contains("added_tokens")) {
-            for (const auto &t : j["added_tokens"]) {
-                if (t.contains("id") && t.contains("content")) {
-                    int id = t["id"].get<int>();
-                    std::string content = t["content"].get<std::string>();
-                    if (id >= 0) {
-                        if (id >= (int)id_to_token_.size()) id_to_token_.resize(id + 1);
-                        id_to_token_[id] = content;
-                    }
-                }
-            }
-        }
-        
-        // Build fast cache for most common tokens (first 10k)
-        for (int i = 0; i < std::min(10000, (int)id_to_token_.size()); ++i) {
-            if (!id_to_token_[i].empty()) {
-                fast_token_cache_[i] = id_to_token_[i];
-            }
-        }
-        
-        std::cout << "🏎️ Built ultra-fast vocab: " << id_to_token_.size() 
-                  << " tokens, " << fast_token_cache_.size() << " cached" << std::endl;
-    }
+
 
     void pre_allocate_all_tensors() {
         // Pre-allocate all tensor shapes to avoid vector reallocations
@@ -230,17 +167,21 @@ public:
         head_dim_ = config["head_dim"];
         num_layers_ = config["num_hidden_layers"];
 
-        // Initialize tokenizer
-        tokenizer_ = std::make_unique<tokenizers::Tokenizer>(model_dir + "/tokenizer.json");
+        // Initialize tokenizer with config (for chat template support)
+        std::string tokenizer_path = model_dir + "/tokenizer.json";
+        std::string tokenizer_config_path = model_dir + "/tokenizer_config.json";
+        tokenizer_ = std::make_unique<tokenizers::Tokenizer>(tokenizer_path, tokenizer_config_path);
         if (!tokenizer_->valid()) {
-            throw std::runtime_error("Failed to load tokenizer from: " + model_dir + "/tokenizer.json");
+            throw std::runtime_error("Failed to load tokenizer from: " + tokenizer_path);
+        }
+        
+        std::cout << "📝 Tokenizer loaded (vocab size: " << tokenizer_->vocab_size() << ")" << std::endl;
+        if (tokenizer_->has_chat_template()) {
+            std::cout << "💬 Chat template available" << std::endl;
         }
 
         // Build ONNX session
         session_ = build_session(onnx_path);
-        
-        // Build ultra-fast vocabulary
-        build_ultra_fast_vocab(model_dir);
         
         // Pre-allocate ALL data structures
         current_tokens_.reserve(4096);
@@ -257,9 +198,17 @@ public:
     void run_inference(const std::string& prompt, int max_decode = 64, bool short_answer = false) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        // Apply chat template for Qwen3 models
-        // Format: <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
-        std::string formatted_prompt = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        // Apply chat template using tokenizer's built-in support
+        std::string formatted_prompt;
+        if (tokenizer_->has_chat_template()) {
+            std::vector<tokenizers::ChatMessage> messages = {
+                {"user", prompt}
+            };
+            formatted_prompt = tokenizer_->apply_chat_template(messages, true);
+        } else {
+            // Fallback: manual Qwen3 format
+            formatted_prompt = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        }
         
         // Encode tokens
         auto ids_vec = tokenizer_->encode(formatted_prompt, true);
@@ -334,22 +283,12 @@ public:
             // Fast stop token check
             if (token_id == 151643 || token_id == 151645) break;
 
-            // Ultra-fast token decode - check cache first, then array
-            const std::string* token_str = nullptr;
-            auto cache_it = fast_token_cache_.find(token_id);
-            if (cache_it != fast_token_cache_.end()) {
-                token_str = &cache_it->second;
-            } else if (token_id >= 0 && token_id < (int)id_to_token_.size() && !id_to_token_[token_id].empty()) {
-                token_str = &id_to_token_[token_id];
-            }
+            // Decode token using tokenizer's decode API
+            std::vector<int32_t> single_token = {static_cast<int32_t>(token_id)};
+            std::string token_str = tokenizer_->decode(single_token, false);
             
-            if (token_str) {
-                std::cout << *token_str << std::flush;
-                decoded_text += *token_str;
-            } else {
-                // Fallback for unknown tokens
-                std::cout << "[" << token_id << "]" << std::flush;
-            }
+            std::cout << token_str << std::flush;
+            decoded_text += token_str;
 
             // Fast short answer check
             if (short_answer && decoded_text.find_first_of(".\n!?") != std::string::npos) {
@@ -398,9 +337,6 @@ public:
         std::cout << "Device: " << (use_cuda_ ? "ULTRA-CUDA GPU" : "CPU") << std::endl;
     }
 };
-
-// Thread-local storage definition
-thread_local std::string UltraFastOnnxInference::decode_buffer_;
 
 int main(int argc, char* argv[]) {
     try {

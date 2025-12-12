@@ -174,6 +174,9 @@ def run_decode_loop(
     # If that assumption is violated, we fall back to a best-effort mapping by name.
     try:
         # map last 4 inputs by position
+        #input_names is comming from sess.get_inputs()
+        #inputs are coming from prepare_inputs()
+        #output_names is coming from sess.get_outputs()
         input_feed[input_names[-4]] = inputs["input_ids"]
         input_feed[input_names[-3]] = inputs["history_len"]
         input_feed[input_names[-2]] = inputs["ids_len"]

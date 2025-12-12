@@ -18,7 +18,6 @@ private:
     Ort::Env env_;
     std::unique_ptr<Ort::Session> session_;
     std::unique_ptr<tokenizers::Tokenizer> tokenizer_;
-    std::vector<std::string> id_to_token_;
     int num_key_value_heads_;
     int head_dim_;
     int num_layers_;
@@ -101,50 +100,20 @@ public:
         head_dim_ = config["head_dim"];
         num_layers_ = config["num_hidden_layers"];
 
-        // Initialize tokenizer (HuggingFace Tokenizers C++ binding)
-        // Expects a `tokenizer.json` produced by the HF Tokenizers / Transformers
-        tokenizer_ = std::make_unique<tokenizers::Tokenizer>(model_dir + "/tokenizer.json");
+        // Initialize tokenizer with config (for chat template support)
+        std::string tokenizer_path = model_dir + "/tokenizer.json";
+        std::string tokenizer_config_path = model_dir + "/tokenizer_config.json";
+        tokenizer_ = std::make_unique<tokenizers::Tokenizer>(tokenizer_path, tokenizer_config_path);
         if (!tokenizer_->valid()) {
-            throw std::runtime_error("Failed to load tokenizer from: " + model_dir + "/tokenizer.json");
+            throw std::runtime_error("Failed to load tokenizer from: " + tokenizer_path);
+        }
+        
+        std::cout << "Tokenizer loaded (vocab size: " << tokenizer_->vocab_size() << ")" << std::endl;
+        if (tokenizer_->has_chat_template()) {
+            std::cout << "Chat template available" << std::endl;
         }
 
-        // Build id->token map from tokenizer.json for naive decoding
-        auto build_id_to_token_map = [&](const std::string &tokenizer_json_path) {
-            std::ifstream f(tokenizer_json_path);
-            if (!f.is_open()) return std::vector<std::string>{};
-            json j;
-            f >> j;
-            std::vector<std::string> id_to_token;
-            if (j.contains("model") && j["model"].contains("vocab")) {
-                auto vocab = j["model"]["vocab"];
-                int max_id = -1;
-                for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-                    int id = it.value().get<int>();
-                    if (id > max_id) max_id = id;
-                }
-                id_to_token.assign(max_id + 1, std::string());
-                for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-                    const std::string token = it.key();
-                    int id = it.value().get<int>();
-                    if (id >= 0 && id < (int)id_to_token.size()) id_to_token[id] = token;
-                }
-            }
-            if (j.contains("added_tokens")) {
-                for (const auto &t : j["added_tokens"]) {
-                    if (t.contains("id") && t.contains("content")) {
-                        int id = t["id"].get<int>();
-                        std::string content = t["content"].get<std::string>();
-                        if (id >= 0) {
-                            if (id >= (int)id_to_token.size()) id_to_token.resize(id + 1);
-                            id_to_token[id] = content;
-                        }
-                    }
-                }
-            }
-            return id_to_token;
-        };
 
-        id_to_token_ = build_id_to_token_map(model_dir + "/tokenizer.json");
 
         // Build ONNX session
         session_ = build_session(onnx_path, prefer_cuda);
@@ -153,9 +122,17 @@ public:
     void run_inference(const std::string& prompt, int max_decode = 512, bool short_answer = false) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        // Apply chat template for Qwen3 models
-        // Format: <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
-        std::string formatted_prompt = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        // Apply chat template using tokenizer's built-in support
+        std::string formatted_prompt;
+        if (tokenizer_->has_chat_template()) {
+            std::vector<tokenizers::ChatMessage> messages = {
+                {"user", prompt}
+            };
+            formatted_prompt = tokenizer_->apply_chat_template(messages, true);
+        } else {
+            // Fallback: manual Qwen3 format
+            formatted_prompt = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        }
         
         // Encode tokens first and keep them alive
         auto ids_vec = tokenizer_->encode(formatted_prompt, true);
@@ -271,21 +248,9 @@ public:
                 break;
             }
 
-            // Decode and print token
-            std::string token_str;
-            if (token_id >= 0 && token_id < (int)id_to_token_.size() && !id_to_token_[token_id].empty()) {
-                token_str = id_to_token_[token_id];
-                // Replace occurrences of UTF-8 bytes for 'Ġ' (0xC4 0xA0) with space
-                size_t pos = 0;
-                while (true) {
-                    auto it = token_str.find("\xC4\xA0", pos);
-                    if (it == std::string::npos) break;
-                    token_str.replace(it, 2, " ");
-                    pos = it + 1;
-                }
-            } else {
-                token_str = "[" + std::to_string(token_id) + "]";
-            }
+            // Decode and print token using tokenizer's decode API
+            std::vector<int32_t> single_token = {static_cast<int32_t>(token_id)};
+            std::string token_str = tokenizer_->decode(single_token, false);
 
             std::cout << token_str << std::flush;
             decoded_text += token_str;
