@@ -1,0 +1,4 @@
+[submodule "tokenizers"]
+	path = tokenizers
+	url = https://github.com/thammegowda/tokenizers.git
+	branch = tg/cpp
