@@ -4,9 +4,20 @@ QWENWrapper Exploration Script
 
 Compact exploration of the QWENWrapper class with helper utilities.
 """
-
+import os
 import torch
+from torch import nn
 from pathlib import Path
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import json
+import time
+
+
+DTYPE = torch.bfloat16
+MAX_SEQ_LEN = 4096
+MAX_NEW_TOKS = 128
+EOS_TOKS = (151643, 151645)
 
 
 # ============================================================================
@@ -36,7 +47,7 @@ def repeat_v(kv_states: torch.Tensor, num_key_value_groups: int, head_dim: int, 
 # QWENWrapper Class
 # ============================================================================
 
-class QWENWrapper(torch.nn.Module):
+class QWENWrapper(nn.Module):
     """Lightweight wrapper around the original HF model to prepare it for ONNX export.
 
     The wrapper preserves the original inference contract used by the exporter
@@ -44,8 +55,10 @@ class QWENWrapper(torch.nn.Module):
     produces the past keys/values updates plus the next-token id and kv_seq_len.
     """
 
-    def __init__(self, qwen, max_seq_len: int, num_heads: int, num_key_value_heads: int, head_dim: int, num_layers: int):
+    def __init__(self, qwen: nn.Module, max_seq_len: int, num_heads: int, num_key_value_heads: int, head_dim: int, num_layers: int):
         super().__init__()
+
+        dtype = qwen.dtype
         self.qwen = qwen
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -73,13 +86,13 @@ class QWENWrapper(torch.nn.Module):
         self.register_buffer('zero_point', zero_point)
         self.register_buffer('scale', scale)
         self.register_buffer('embed_data', embed_data)
-
-        position_ids = torch.arange(max_seq_len, dtype=torch.float32, device=device).unsqueeze(-1)
+        
+        position_ids = torch.arange(max_seq_len, device=device).unsqueeze(-1)
         idx_theta = position_ids * self.qwen.model.rotary_emb.inv_freq.to(device)
         cos_rotary_pos_emb = torch.cos(idx_theta)
         sin_rotary_pos_emb = torch.sin(idx_theta)
-        self.register_buffer('cos_rotary_pos_emb', torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).unsqueeze(0).half())
-        self.register_buffer('sin_rotary_pos_emb', torch.cat((sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).unsqueeze(0).half())
+        self.register_buffer('cos_rotary_pos_emb', torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).unsqueeze(0).to(dtype=dtype))
+        self.register_buffer('sin_rotary_pos_emb', torch.cat((sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).unsqueeze(0).to(dtype=dtype))
 
         self.register_buffer('attention_mask', (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8, device=device))) * -128)
         
@@ -96,9 +109,9 @@ class QWENWrapper(torch.nn.Module):
         Args:
             key_buffer: pre-allocated tensor for key states [num_layers, num_kv_heads, 1, head_dim, max_seq_len]
             value_buffer: pre-allocated tensor for value states [num_layers, num_kv_heads, 1, max_seq_len, head_dim]
-            input_ids: [batch, seq_len]
-            history_len: scalar tensor
-            attention_mask: tensor for attention mask
+            input_ids: [batch=1, seq_len]
+            past_len: scalar tensor
+            attention_mask: tensor for attention mask [batch=1, seq_len]
         """
         
         # Use pre-allocated buffer for efficient in-place updates
@@ -109,15 +122,16 @@ class QWENWrapper(torch.nn.Module):
         assert value_buffer.size(0) == self.num_layers, "Value buffer layer size mismatch"
         assert key_buffer.size(0) == value_buffer.size(0), "Key/Value buffer layer size mismatch"
 
-        posemb_cos_q = self.cos_rotary_pos_emb[:, past_len:end_idx].float()
-        posemb_sin_q = self.sin_rotary_pos_emb[:, past_len:end_idx].float()
+        posemb_cos_q = self.cos_rotary_pos_emb[:, past_len:end_idx]
+        posemb_sin_q = self.sin_rotary_pos_emb[:, past_len:end_idx]
         posemb_cos_k = posemb_cos_q.transpose(-1, -2)
         posemb_sin_k = posemb_sin_q.transpose(-1, -2)
-        hidden_states = self.embed_data[input_ids].float() * self.scale[input_ids] + self.zero_point[input_ids]
+        hidden_states = self.embed_data[input_ids] * self.scale[input_ids] + self.zero_point[input_ids]
+
         attention_mask = self.attention_mask[:, :input_ids.size(1), :end_idx] * attention_mask
-        attention_mask = attention_mask.float()
+        attention_mask = attention_mask.to(dtype=hidden_states.dtype)
         
-        for i, layer in enumerate(self.qwen.model.layers):
+        for i, layer in enumerate(self.qwen.model.layers): 
             hidden_states_norm = layer.input_layernorm.weight * (hidden_states / torch.sqrt(hidden_states.pow(2).mean(-1, keepdim=True) + self.variance_epsilon))
             q = layer.self_attn.q_proj(hidden_states_norm).view(-1, self.num_heads, self.head_dim)
             new_k = layer.self_attn.k_proj(hidden_states_norm).view(-1, 1, self.num_key_value_heads, self.head_dim)
@@ -130,15 +144,26 @@ class QWENWrapper(torch.nn.Module):
             
             # Update KV cache using pre-allocated buffer (no concatenation needed)
             # Copy new data to buffer
-            key_buffer[i, :, :, :, past_len:end_idx] = new_k
-            value_buffer[i, :, :, past_len:end_idx, :] = new_v
+            # key_buffer[i, :, :, :, past_len:end_idx] = new_k
+            # value_buffer[i, :, :, past_len:end_idx, :] = new_v
+            # Alternative using torch.narrow() and copy_()
+            key_slice = key_buffer[i].narrow(-1, past_len, new_len)
+            key_slice.copy_(new_k)
+
+            value_slice = value_buffer[i].narrow(-2, past_len, new_len)
+            value_slice.copy_(new_v)
             
             # Expand (zero-copy) instead of repeat
-            k_expanded = repeat_k(key_buffer[i, :, :, :, :end_idx], self.num_key_value_groups, self.head_dim, self.num_heads)
-            v_expanded = repeat_v(value_buffer[i, :, :, :end_idx, :], self.num_key_value_groups, self.head_dim, self.num_heads)
+            # k_unique = key_buffer[i, :, :, :, :end_idx]
+            # v_unique = value_buffer[i, :, :, :end_idx, :]
+            k_unique = key_buffer[i].narrow(-1, 0, end_idx)  # [num_kv_heads, 1, head_dim, end_idx]
+            v_unique = value_buffer[i].narrow(-2, 0, end_idx) # [num_kv_heads, 1, end_idx, head_dim]
+            k_expanded = repeat_k(k_unique, self.num_key_value_groups, self.head_dim, self.num_heads)
+            v_expanded = repeat_v(v_unique, self.num_key_value_groups, self.head_dim, self.num_heads)
             
-            import torch.nn.functional as F
-            attn = F.softmax(torch.matmul(q * posemb_cos_q + rotate_half(q, self.head_dim_half, -1) * posemb_sin_q, k_expanded) + attention_mask, dim=-1, dtype=torch.float32)
+            #TODO: use F.scaled_dot_product_attention() for better performance in torch
+            attn = F.softmax(
+                torch.matmul(q * posemb_cos_q + rotate_half(q, self.head_dim_half, -1) * posemb_sin_q, k_expanded) + attention_mask, dim=-1, dtype=q.dtype)
             attn_out = layer.self_attn.o_proj(torch.matmul(attn, v_expanded).transpose(0, 1).contiguous().view(1, -1, layer.self_attn.o_proj.in_features))
             hidden_states += attn_out
             residual = hidden_states
@@ -151,79 +176,89 @@ class QWENWrapper(torch.nn.Module):
         
         logits = self.qwen.lm_head(hidden_states)
         # TODO: return full logits for sampling
-        tok_id = torch.argmax(logits, dim=-1, keepdim=True).int()
+        tok_id = torch.argmax(logits, dim=-1, keepdim=True)
         return tok_id
 
+
+def onnx_export(wrapper: QWENWrapper, output_path:str):
+   
+    device = wrapper.qwen.device
+    # Export to ONNX
+    print("Exporting to ONNX...")
+    
+    dummy_key_buffer = torch.zeros(wrapper.num_layers, wrapper.num_key_value_heads, 1, wrapper.head_dim, MAX_SEQ_LEN, 
+                                   dtype=DTYPE, device=device)
+    dummy_value_buffer = torch.zeros(wrapper.num_layers, wrapper.num_key_value_heads, 1, MAX_SEQ_LEN, wrapper.head_dim,
+                                     dtype=DTYPE, device=device)
+    dummy_input_ids = torch.zeros(1, 1, dtype=torch.int32, device=device)
+    dummy_attention_mask = torch.zeros(1, 1, dtype=torch.int8, device=device)
+    dummy_past_len = 0
+    inputs = (dummy_key_buffer, dummy_value_buffer, dummy_input_ids, dummy_attention_mask, dummy_past_len)
+    input_names = ['key_buffer', 'value_buffer', 'input_ids', 'attention_mask', 'past_len']
+    output_names = ['next_token_id'] #TODO: full logits for sampling
+    dynamic_axes = {
+        'key_buffer': {4: 'max_seq_len'}, #[num_layers, num_kv_heads, 1, head_dim, *max_seq_len*]
+        'value_buffer': {3: 'max_seq_len'}, #[num_layers, num_kv_heads, 1, *max_seq_len*, head_dim]
+        'input_ids': {1: 'seq_len'}, #[batch=1, *seq_len*]
+        'attention_mask': {1: 'seq_len'}, #[batch=1, *seq_len*]
+        'past_len': {},
+    }
+
+    torch.onnx.export(
+        wrapper,
+        inputs,
+        str(output_path),
+        input_names=input_names,
+        output_names=output_names,
+        #dynamo=False,, dynamic_axes=dynamic_axes,
+        dynamo=True, dynamic_shapes=dynamic_axes,
+        #opset_version=18,
+        #do_constant_folding=True,
+    )
 
 # ============================================================================
 # Example Usage
 # ============================================================================
-
-if __name__ == "__main__":
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    import json
-    
+def torch_inference(wrapper: QWENWrapper, tokenizer: AutoTokenizer):
     # Load config and model
-    with open('config.json', 'r') as f:
-        config = json.load(f)
+   
+    model = wrapper.qwen
+    device = model.device
     
-    model_path = config['paths']['model_path']
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    print("Loading model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.float32,
-        trust_remote_code=True,
-        low_cpu_mem_usage=True
-    ).eval()
-    model.to(device)
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    
-    # Create wrapper
-    print("Creating wrapper...")
-    wrapper = QWENWrapper(
-        qwen=model,
-        max_seq_len=4096,
-        num_heads=model.config.num_attention_heads,
-        num_key_value_heads=model.config.num_key_value_heads,
-        head_dim=model.config.head_dim,
-        num_layers=model.config.num_hidden_layers
-    )
-    wrapper.to(device)
-    wrapper.eval()
-    
-    # Your prompt
+    # Your prompt with proper chat format
     prompt = "sing a song about the wonders of AI technology."
     
+    # Format with chat template
+    messages = [{"role": "user", "content": prompt}]
+    formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
     # Tokenize
-    prompt_ids = tokenizer.encode(prompt, add_special_tokens=True)
+    prompt_ids = tokenizer.encode(formatted_prompt, add_special_tokens=False)
     print(f"\nPrompt: {prompt}")
+    print(f"Formatted: {formatted_prompt}")
     print(f"Token IDs: {prompt_ids}\n")
     
     # Initialize cache (list of tensors per layer, like old version)
     num_layers = model.config.num_hidden_layers
     num_key_value_heads = model.config.num_key_value_heads
     head_dim = model.config.head_dim
-    
-    cache_keys = [torch.zeros(num_key_value_heads, 1, head_dim, 0, dtype=torch.float32, device=device) 
-                  for _ in range(num_layers)]
-    cache_values = [torch.zeros(num_key_value_heads, 1, 0, head_dim, dtype=torch.float32, device=device) 
-                    for _ in range(num_layers)]
-    
+
+    key_buffer = torch.zeros(num_layers, num_key_value_heads, 1, head_dim, MAX_SEQ_LEN, 
+                                          dtype=DTYPE, device=device)
+    value_buffer = torch.zeros(num_layers, num_key_value_heads, 1, MAX_SEQ_LEN, head_dim,
+                                            dtype=DTYPE, device=device)
+        
     # Process prompt
     prompt_tensor = torch.tensor([prompt_ids], dtype=torch.int32, device=device)
-    history_len = torch.tensor([0], dtype=torch.int64, device=device)
-    ids_len = torch.tensor([len(prompt_ids)], dtype=torch.int64, device=device)
-    attention_mask = torch.tensor([0], dtype=torch.int8, device=device)
+    past_len = 0  # No history for first call
+    attention_mask = torch.tensor([[0]], dtype=torch.int8, device=device)
     
     print("Processing prompt...")
     with torch.no_grad():
-        cache_keys, cache_values, next_token_tensor, kv_seq_len = wrapper(
-            cache_keys, cache_values, prompt_tensor, history_len, ids_len, attention_mask
+        next_token_tensor = wrapper(
+            key_buffer, value_buffer, prompt_tensor, attention_mask, past_len
         )
-    
+ 
     # Extract results
     next_token_id = next_token_tensor.item()
     
@@ -231,35 +266,37 @@ if __name__ == "__main__":
     print(f"Token: '{tokenizer.decode([next_token_id])}'")
     
     # Generate more tokens with timing
-    print("\nGenerating 20 tokens with timing:\n")
+    print(f"\nGenerating {MAX_NEW_TOKS} tokens with timing:\n")
     generated = prompt_ids + [next_token_id]
-    
-    import time
+
     start_time = time.time()
-    
-    for i in range(20):
+    for i in range(MAX_NEW_TOKS):
         next_id_tensor = torch.tensor([[next_token_id]], dtype=torch.int32, device=device)
-        history_len = torch.tensor([len(prompt_ids) + i], dtype=torch.int64, device=device)
-        ids_len = torch.tensor([1], dtype=torch.int64, device=device)
-        attention_mask = torch.tensor([0], dtype=torch.int8, device=device)
+        past_len = len(prompt_ids) + i  # Scalar integer for past length
+        attention_mask = torch.tensor([[0]], dtype=torch.int8, device=device)
         
         with torch.no_grad():
-            cache_keys, cache_values, next_token_tensor, kv_seq_len = wrapper(
-                cache_keys, cache_values, next_id_tensor, history_len, ids_len, attention_mask
-            )
+            next_token_tensor = wrapper(
+                key_buffer, value_buffer, next_id_tensor, attention_mask, past_len)
+
         
         next_token_id = next_token_tensor.item()
         generated.append(next_token_id)
         
         elapsed = time.time() - start_time
         tokens_generated = i + 1
-        tokens_per_sec = tokens_generated / elapsed if elapsed > 0 else 0
-        
-        print(f"Token {i+1:2d}: '{tokenizer.decode([next_token_id]):20s}' | Time: {elapsed:6.2f}s | Speed: {tokens_per_sec:6.2f} tokens/sec")
-    
+        if i % 10 == 0:
+            tokens_per_sec = tokens_generated / elapsed if elapsed > 0 else 0
+            print(f"Token {i+1:2d}: '{tokenizer.decode([next_token_id]):20s}' | Time: {elapsed:6.2f}s | Speed: {tokens_per_sec:6.2f} tokens/sec")
+
+        # Check if we should stop
+        if next_token_id in EOS_TOKS:  # Stop tokens
+            print("Stop token generated, ending.")
+            break
+
     end_time = time.time()
     total_time = end_time - start_time
-    total_tokens = 20
+    total_tokens = len(generated) - len(prompt_ids)
     avg_tokens_per_sec = total_tokens / total_time
     
     print(f"\n{'='*80}")
@@ -273,3 +310,47 @@ if __name__ == "__main__":
     print(f"\nFull generated text:")
     print(tokenizer.decode(generated))
 
+
+def main():
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+    
+    model_path = config['paths']['model_path']
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    print("Loading model...")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype=DTYPE,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True
+    ).eval()
+    model.to(device)
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    
+    # Create wrapper
+    print("Creating wrapper...")
+    wrapper = QWENWrapper(
+        qwen=model,
+        max_seq_len=MAX_SEQ_LEN,
+        num_heads=model.config.num_attention_heads,
+        num_key_value_heads=model.config.num_key_value_heads,
+        head_dim=model.config.head_dim,
+        num_layers=model.config.num_hidden_layers
+    )
+    wrapper.to(device)
+    wrapper.eval()
+    
+    
+    #torch_inference(wrapper, tokenizer)
+
+    out_path = "qwen_wrapper_v2.onnx"
+    onnx_export(wrapper, out_path)
+
+
+if __name__ == "__main__":
+    main()
